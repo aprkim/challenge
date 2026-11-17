@@ -1,5 +1,5 @@
 // Data layer: challenge config from /challenges.json, participants and check-ins in
-// Firestore (tiny-wins25), signed in anonymously like tiny-do.
+// Firestore (lihallc-challenge), signed in anonymously.
 //
 // Firestore layout:
 //   challenges/{category-slug}/participants/{lowercased name}

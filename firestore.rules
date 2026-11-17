@@ -1,14 +1,10 @@
 rules_version = '2';
-// Rules for the challenge app (challenge.lihallc.com).
-//
-// DO NOT deploy this file on its own: Firestore rules are project-wide for tiny-wins25
-// and tiny-do/firestore.rules is the source of truth. Paste the block between the
-// BEGIN/END markers into that file (inside `match /databases/{database}/documents`)
-// and deploy from tiny-do. This standalone file exists for the emulator tests.
+// Firestore rules for the lihallc-challenge project (challenge.lihallc.com).
+// This file is the source of truth. Deploy with: firebase deploy --only firestore:rules
+// or paste the whole file into Firebase console → Firestore → Rules → Publish.
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // BEGIN challenge.lihallc.com ─────────────────────────────────────────────
     // challenges/{category-slug}/participants/{lowercased name}
     //   { name, createdAt, dates: ['YYYY-MM-DD', ...] }
     // No login: visitors are anonymous Firebase users. Anyone in can read the board,
@@ -43,6 +39,5 @@ service cloud.firestore {
 
       allow delete: if false;
     }
-    // END challenge.lihallc.com ───────────────────────────────────────────────
   }
 }
