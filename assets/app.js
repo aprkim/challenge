@@ -313,6 +313,11 @@ async function boot() {
       location.replace(`/${category}/${current.slug}`);
       return;
     }
+    // Numbers are canonical without leading zeros: /exercise/03 and /exercise/003 → /exercise/3
+    if (/^0+\d+$/.test(slug)) {
+      location.replace(`/${category}/${Number(slug)}${location.hash}`);
+      return;
+    }
     const challenge = all.find((c) => c.slug === slug);
     if (!challenge) { state.view = 'notfound'; render(); return; }
     state.challenge = challenge;

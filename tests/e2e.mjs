@@ -4,7 +4,8 @@
 import { spawn } from 'node:child_process';
 import { strict as assert } from 'node:assert';
 import { createRequire } from 'node:module';
-import { todayLocal, addDays } from '../assets/dates.js';
+import { readFileSync } from 'node:fs';
+import { todayLocal, addDays, pickCurrent } from '../assets/dates.js';
 
 // Uses the machine's Playwright (global install, resolved through NODE_PATH).
 const { chromium, devices } = createRequire(import.meta.url)('playwright');
@@ -49,14 +50,19 @@ const step = (msg) => console.log('✓', msg);
 try {
   // --- /exercise redirects to the current challenge; Welcome copy ---
   const a = await iphone.newPage();
+  const real = JSON.parse(readFileSync(new URL('../challenges.json', import.meta.url), 'utf8'));
+  const current = pickCurrent(real.filter((c) => c.category === 'exercise'), today);
   await a.goto(BASE + '/');
-  await a.waitForURL('**/exercise/03');
+  await a.waitForURL(`**/exercise/${current.slug}`);
+  await a.getByText(current.title).waitFor();
+  await a.goto(BASE + '/exercise/003');
+  await a.waitForURL('**/exercise/3');
   await a.getByText('연말 6주 챌린지').waitFor();
   assert.equal(await a.locator('.meta').textContent(), 'Nov 20 to Dec 31 · 4 times a week · Goal 24');
   assert.equal(await a.locator('.cta').textContent(), 'Pick your name to start');
   assert.ok(await a.locator('.cta').isDisabled());
   assert.equal(await a.locator('.names').count(), 0);
-  step('/ → /exercise → /exercise/03, Welcome copy, CTA disabled');
+  step(`/ → /exercise → /exercise/${current.slug} (current), /exercise/003 → /exercise/3, Welcome copy, CTA disabled`);
 
   await a.fill('#newname', 'April');
   await a.press('#newname', 'Enter');

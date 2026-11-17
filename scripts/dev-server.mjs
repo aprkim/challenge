@@ -1,5 +1,5 @@
 // Local server that behaves like GitHub Pages: serves files, dir/index.html, and falls back
-// to 404.html (the app shell) for every other path, so /exercise and /exercise/03 work.
+// to 404.html (the app shell) for every other path, so /exercise and /exercise/3 work.
 //   node scripts/dev-server.mjs                       -> production Firebase (config.js)
 //   EMULATOR=1 node scripts/dev-server.mjs            -> Firebase emulators (tests)
 import { createServer } from 'node:http';

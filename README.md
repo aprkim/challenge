@@ -2,7 +2,7 @@
 
 Mobile-first check-in app for community challenges. Static HTML/CSS/JS with no build step, hosted on **GitHub Pages**. Data lives in **Firestore in its own Firebase project, `lihallc-challenge`** (free Spark plan), with anonymous sign-in.
 
-- `/exercise/03`: a challenge from `challenges.json`
+- `/exercise/3`: a challenge from `challenges.json`. Numeric slugs have no leading zeros; `/exercise/03` and `/exercise/003` redirect to `/exercise/3`.
 - `/exercise`: redirects to the current challenge (the latest one that has started, else the next one to start)
 - `/`: redirects to `/exercise`
 
@@ -16,7 +16,10 @@ GitHub Pages has no URL rewrites, so `404.html` is a copy of `index.html` and se
 
 ## Launching the next challenge
 
-Add an entry to `challenges.json` with slug `"04"` and its title and dates, then push. `/exercise/04` works right away, and `/exercise` switches to it on its start date. Each challenge's data sits under its own key (`exercise-04`), so nothing carries over.
+Share `challenge.lihallc.com/exercise` with the group. It always opens the current challenge, so the link never changes.
+
+
+Add an entry to `challenges.json` with slug `"4"` and its title and dates, then push. `/exercise/4` works right away, and `/exercise` switches to it on its start date. Each challenge's data sits under its own key (`exercise-4`), so nothing carries over.
 
 ## Data
 
