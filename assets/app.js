@@ -8,19 +8,14 @@ const state = {
   view: 'loading', // loading | error | notfound | welcome | app
   errorMsg: '',
   category: '',
-  slug: '',
   challenge: null,
-  participants: [], // [{ id, name, dates: Set }]
+  key: '', // Firestore key, e.g. 'exercise-03'
+  participants: [], // [{ id, name, dates: Set }], live from Firestore
   meId: null,
   picked: null, // participant id selected on Welcome
   joining: false,
   joinError: '',
 };
-
-// Optimistic check-ins for the current user: date -> desired checked state.
-const pending = new Map();
-const inflight = new Set();
-let writeSeq = 0;
 
 // ---------- helpers ----------
 
@@ -29,7 +24,7 @@ const esc = (s) =>
 
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
-const storageKey = () => `challenge:${state.challenge.id}:participant`;
+const storageKey = () => `challenge:${state.key}:participant`;
 
 function readIdentity() {
   try { return localStorage.getItem(storageKey()); } catch { return null; }
@@ -42,15 +37,8 @@ function clearIdentity() {
 }
 
 const me = () => state.participants.find((p) => p.id === state.meId) || null;
-
-function myDates() {
-  const p = me();
-  const set = new Set(p ? p.dates : []);
-  for (const [date, want] of pending) want ? set.add(date) : set.delete(date);
-  return set;
-}
-
-const datesFor = (p) => (p.id === state.meId ? myDates() : p.dates);
+const myDates = () => me()?.dates || new Set();
+const datesFor = (p) => p.dates;
 
 let toastTimer;
 function toast(msg) {
@@ -237,9 +225,8 @@ function showWelcome() {
 function enterApp(id) {
   state.meId = id;
   saveIdentity(id);
-  pending.clear();
   state.view = 'app';
-  if (location.hash !== '#checkins' && location.hash) history.replaceState(null, '', location.pathname);
+  if (location.hash && location.hash !== '#checkins') history.replaceState(null, '', location.pathname);
   render();
   window.scrollTo(0, 0);
 }
@@ -248,8 +235,12 @@ async function join(form) {
   const input = form.elements.name;
   const name = input.value.replace(/\s+/g, ' ').trim();
   if (!name) { input.focus(); return; }
-  const find = () => state.participants.find((p) => p.name.toLowerCase() === name.toLowerCase());
-  const existing = find();
+  if (api.invalidName(name)) {
+    state.joinError = "That name can't be used. Try another.";
+    render();
+    return;
+  }
+  const existing = state.participants.find((p) => p.name.toLowerCase() === name.toLowerCase());
   if (existing) {
     state.picked = existing.id;
     input.value = '';
@@ -261,15 +252,8 @@ async function join(form) {
   state.joinError = '';
   render();
   try {
-    const created = await api.addParticipant(state.challenge.id, name);
-    if (created) {
-      state.participants.push({ id: created.id, name: created.name, dates: new Set() });
-      state.picked = created.id;
-    } else {
-      // Someone else just took this name; reload and select it.
-      await refresh();
-      state.picked = find()?.id || null;
-    }
+    const p = await api.join(state.key, name); // returns the existing person if the name was just taken
+    state.picked = p.id;
     document.getElementById('newname').value = '';
   } catch {
     state.joinError = "Couldn't add your name. Check your connection and try again.";
@@ -279,55 +263,31 @@ async function join(form) {
   }
 }
 
+/**
+ * Optimistic by way of Firestore: the local write shows in the live snapshot right away,
+ * and if the server rejects it the SDK reverts it and the promise rejects.
+ */
 function toggle(date) {
   const want = !myDates().has(date);
-  pending.set(date, want);
-  writeSeq++;
-  render();
-  sync(date);
-}
-
-/** Pushes the latest desired state for one date; rapid double-taps collapse into the final state. */
-async function sync(date) {
-  if (inflight.has(date)) return;
-  inflight.add(date);
-  const p = me();
-  try {
-    while (pending.has(date) && pending.get(date) !== p.dates.has(date)) {
-      const want = pending.get(date);
-      if (want) await api.addCheckin(p.id, date);
-      else await api.removeCheckin(p.id, date);
-      want ? p.dates.add(date) : p.dates.delete(date);
-    }
-    pending.delete(date);
-  } catch {
-    pending.delete(date); // roll back to the last saved state
+  api.setCheckin(state.key, state.meId, date, want).catch(() => {
     toast("Couldn't save. Check your connection and try again.");
-  } finally {
-    inflight.delete(date);
-    render();
-  }
+  });
 }
 
-async function refresh() {
-  const seq = writeSeq;
-  const fresh = await api.getParticipants(state.challenge.id);
-  const mine = me();
-  // Keep our own dates if a write happened while this request was in flight.
-  if (mine && (seq !== writeSeq || inflight.size)) {
-    const f = fresh.find((p) => p.id === mine.id);
-    if (f) f.dates = mine.dates;
+function onParticipants(list) {
+  state.participants = list;
+  if (state.view === 'loading') {
+    const saved = readIdentity();
+    if (saved && list.some((p) => p.id === saved)) {
+      state.meId = saved;
+      state.view = 'app';
+    } else {
+      if (saved) clearIdentity();
+      showWelcome();
+      return;
+    }
   }
-  state.participants = fresh;
-}
-
-async function refreshQuietly() {
-  if (!state.challenge || (state.view !== 'app' && state.view !== 'welcome')) return;
-  try {
-    await refresh();
-    if (state.view === 'app' && !me()) { clearIdentity(); showWelcome(); return; }
-    render();
-  } catch { /* keep showing what we have */ }
+  render();
 }
 
 // ---------- boot ----------
@@ -337,33 +297,32 @@ function parsePath() {
   return m ? { category: m[1].toLowerCase(), slug: m[2] || '' } : { category: 'exercise', slug: '' };
 }
 
+let unsubscribe = null;
+
 async function boot() {
   state.view = 'loading';
   render();
+  unsubscribe?.();
   const { category, slug } = parsePath();
   state.category = category;
   try {
+    const all = (await api.listChallenges()).filter((c) => c.category === category);
     if (!slug) {
-      const current = pickCurrent(await api.listChallenges(category), todayLocal());
+      const current = pickCurrent(all, todayLocal());
       if (!current) { state.view = 'notfound'; render(); return; }
       location.replace(`/${category}/${current.slug}`);
       return;
     }
-    state.slug = slug;
-    const challenge = await api.getChallenge(category, slug);
+    const challenge = all.find((c) => c.slug === slug);
     if (!challenge) { state.view = 'notfound'; render(); return; }
     state.challenge = challenge;
+    state.key = api.challengeKey(challenge);
     document.title = challenge.title;
-    state.participants = await api.getParticipants(challenge.id);
-    const saved = readIdentity();
-    if (saved && state.participants.some((p) => p.id === saved)) {
-      state.meId = saved;
-      state.view = 'app';
+    unsubscribe = await api.subscribe(state.key, onParticipants, () => {
+      state.view = 'error';
+      state.errorMsg = "Couldn't load the challenge. Check your connection.";
       render();
-    } else {
-      if (saved) clearIdentity();
-      showWelcome();
-    }
+    });
   } catch {
     state.view = 'error';
     state.errorMsg = "Couldn't load the challenge. Check your connection.";
@@ -378,7 +337,7 @@ app.addEventListener('click', (e) => {
   if (action === 'pick') { state.picked = el.dataset.id; state.joinError = ''; render(); }
   else if (action === 'continue' && state.picked) enterApp(state.picked);
   else if (action === 'toggle') toggle(el.dataset.date);
-  else if (action === 'logout') { clearIdentity(); state.meId = null; pending.clear(); showWelcome(); }
+  else if (action === 'logout') { clearIdentity(); state.meId = null; showWelcome(); }
   else if (action === 'retry') boot();
 });
 
@@ -392,13 +351,11 @@ window.addEventListener('hashchange', () => {
   if (state.view !== 'app') return;
   render();
   window.scrollTo(0, 0);
-  if (tab() === 'everyone') refreshQuietly();
 });
 
-// Pick up other devices' check-ins (and a new "today") when the app comes back to the foreground.
+// Data is live; re-render on return so "today" moves forward after midnight.
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') refreshQuietly();
+  if (document.visibilityState === 'visible' && state.view === 'app') render();
 });
-window.addEventListener('pageshow', (e) => { if (e.persisted) refreshQuietly(); });
 
 boot();

@@ -1,54 +1,49 @@
-// Local server that mirrors vercel.json routing.
-//   node scripts/dev-server.mjs                       -> uses config.js (your Supabase project)
-//   POSTGREST_URL=http://localhost:3001 node scripts/dev-server.mjs
-//                                                     -> proxies /rest/v1 to a local PostgREST (tests)
+// Local server that behaves like GitHub Pages: serves files, dir/index.html, and falls back
+// to 404.html (the app shell) for every other path, so /exercise and /exercise/03 work.
+//   node scripts/dev-server.mjs                       -> production Firebase (config.js)
+//   EMULATOR=1 node scripts/dev-server.mjs            -> Firebase emulators (tests)
 import { createServer } from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = join(fileURLToPath(new URL('.', import.meta.url)), '..');
 const port = Number(process.env.PORT || 8080);
-const postgrest = process.env.POSTGREST_URL;
-const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
+const types = {
+  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8',
+  '.svg': 'image/svg+xml', '.json': 'application/json; charset=utf-8',
+};
+
+async function isFile(p) {
+  try { return (await stat(p)).isFile(); } catch { return false; }
+}
 
 createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
+  const send = async (status, file, override) => {
+    res.writeHead(status, { 'content-type': types[extname(file)] || 'application/octet-stream', 'cache-control': 'no-store' });
+    res.end(override ?? (await readFile(file)));
+  };
 
-  if (postgrest && url.pathname.startsWith('/rest/v1/')) {
-    const chunks = [];
-    for await (const c of req) chunks.push(c);
-    const headers = { ...req.headers };
-    delete headers.host;
-    delete headers.apikey;
-    const r = await fetch(postgrest + url.pathname.slice('/rest/v1'.length) + url.search, {
-      method: req.method, headers, body: chunks.length ? Buffer.concat(chunks) : undefined,
-    });
-    res.writeHead(r.status, { 'content-type': r.headers.get('content-type') || 'application/json' });
-    res.end(Buffer.from(await r.arrayBuffer()));
-    return;
+  if (url.pathname === '/config.js' && process.env.EMULATOR) {
+    const src = await readFile(join(root, 'config.js'), 'utf8');
+    return send(200, 'config.js', src.replace(/export const EMULATOR = .*/, "export const EMULATOR = { firestore: 8085, auth: 9099 };")
+      .replace(/projectId: '[^']+'/, "projectId: 'demo-challenge'"));
   }
 
-  if (postgrest && url.pathname === '/config.js') {
-    res.writeHead(200, { 'content-type': types['.js'] });
-    res.end("export const SUPABASE_URL = '';\nexport const SUPABASE_KEY = 'local';\n");
-    return;
+  // Tests: add a challenge that is already running today, so days can be checked.
+  if (url.pathname === '/challenges.json' && process.env.EMULATOR) {
+    const list = JSON.parse(await readFile(join(root, 'challenges.json'), 'utf8'));
+    const { addDays, todayLocal } = await import('../assets/dates.js');
+    const t = todayLocal();
+    list.push({ category: 'test', slug: 't1', community_label: '오늘도 했다', title: '테스트 챌린지',
+      start_date: addDays(t, -25), end_date: addDays(t, 16), bonus_date: addDays(t, 17), goal: 24, weekly_target: 4 });
+    return send(200, 'challenges.json', JSON.stringify(list));
   }
 
-  if (url.pathname === '/') {
-    res.writeHead(307, { location: '/exercise' });
-    res.end();
-    return;
-  }
-
-  const file = normalize(join(root, url.pathname));
-  const isAsset = file.startsWith(root) && extname(file) && !file.includes('/.');
-  try {
-    const body = await readFile(isAsset ? file : join(root, 'index.html'));
-    res.writeHead(200, { 'content-type': types[isAsset ? extname(file) : '.html'] || 'application/octet-stream', 'cache-control': 'no-store' });
-    res.end(body);
-  } catch {
-    res.writeHead(404);
-    res.end('Not found');
-  }
+  const p = normalize(join(root, decodeURIComponent(url.pathname)));
+  if (!p.startsWith(root) || p.includes('/.')) return send(404, join(root, '404.html'));
+  if (await isFile(p)) return send(200, p);
+  if (await isFile(join(p, 'index.html'))) return send(200, join(p, 'index.html'));
+  return send(404, join(root, '404.html'));
 }).listen(port, () => console.log(`http://localhost:${port}`));

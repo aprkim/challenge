@@ -1,0 +1,48 @@
+rules_version = '2';
+// Rules for the challenge app (challenge.lihallc.com).
+//
+// DO NOT deploy this file on its own: Firestore rules are project-wide for tiny-wins25
+// and tiny-do/firestore.rules is the source of truth. Paste the block between the
+// BEGIN/END markers into that file (inside `match /databases/{database}/documents`)
+// and deploy from tiny-do. This standalone file exists for the emulator tests.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // BEGIN challenge.lihallc.com ─────────────────────────────────────────────
+    // challenges/{category-slug}/participants/{lowercased name}
+    //   { name, createdAt, dates: ['YYYY-MM-DD', ...] }
+    // No login: visitors are anonymous Firebase users. Anyone in can read the board,
+    // join once per name, and add or remove check-in dates. Nobody can rename or delete.
+    match /challenges/{challengeKey}/participants/{pid} {
+      function validName(n) {
+        return n is string && n.size() >= 1 && n.size() <= 20 && n == n.trim();
+      }
+      // Dates this write adds (arrayUnion adds at most one; arrayRemove adds none).
+      function added() {
+        return request.resource.data.dates.removeAll(resource.data.dates);
+      }
+
+      allow read: if request.auth != null;
+
+      allow create: if request.auth != null
+        && challengeKey.matches('^[a-z0-9]+-[a-z0-9]+$')
+        && request.resource.data.keys().hasOnly(['name', 'createdAt', 'dates'])
+        && validName(request.resource.data.name)
+        && pid == request.resource.data.name.lower()
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.dates == [];
+
+      allow update: if request.auth != null
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['dates'])
+        && request.resource.data.dates is list
+        && request.resource.data.dates.size() <= 100
+        && (added().size() == 0
+            || (added().size() == 1
+                && added()[0] is string
+                && added()[0].matches('^20[0-9]{2}-[01][0-9]-[0-3][0-9]$')));
+
+      allow delete: if false;
+    }
+    // END challenge.lihallc.com ───────────────────────────────────────────────
+  }
+}

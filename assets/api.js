@@ -1,79 +1,88 @@
-// Thin PostgREST client for Supabase. Only the public key is used (anon role);
-// every rule is enforced by RLS in supabase/schema.sql.
-import { SUPABASE_URL, SUPABASE_KEY } from '/config.js';
+// Data layer: challenge config from /challenges.json, participants and check-ins in
+// Firestore (tiny-wins25), signed in anonymously like tiny-do.
+//
+// Firestore layout:
+//   challenges/{category-slug}/participants/{lowercased name}
+//     { name, createdAt, dates: ['2026-11-20', ...] }
+// The document id is the lowercased name, so names are unique per challenge (case-insensitive)
+// and the rules can enforce it. Check-ins are an array updated with arrayUnion/arrayRemove,
+// which are idempotent and safe across devices.
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.5/firebase-app.js';
+import {
+  getAuth, signInAnonymously, onAuthStateChanged, connectAuthEmulator,
+} from 'https://www.gstatic.com/firebasejs/10.12.5/firebase-auth.js';
+import {
+  getFirestore, connectFirestoreEmulator, collection, doc, onSnapshot, runTransaction,
+  updateDoc, arrayUnion, arrayRemove, serverTimestamp,
+} from 'https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore.js';
+import { FIREBASE_CONFIG, EMULATOR } from '/config.js';
 
-const BASE = `${SUPABASE_URL.replace(/\/$/, '')}/rest/v1`;
-
-export class ApiError extends Error {
-  constructor(status, body) {
-    super(`Request failed (${status})`);
-    this.status = status;
-    this.body = body;
-  }
+const app = initializeApp(FIREBASE_CONFIG);
+const auth = getAuth(app);
+const db = getFirestore(app);
+if (EMULATOR) {
+  connectAuthEmulator(auth, `http://${location.hostname}:${EMULATOR.auth}`, { disableWarnings: true });
+  connectFirestoreEmulator(db, location.hostname, EMULATOR.firestore);
 }
 
-async function request(path, { method = 'GET', body, prefer } = {}) {
-  const headers = { apikey: SUPABASE_KEY, Accept: 'application/json' };
-  if (body !== undefined) headers['Content-Type'] = 'application/json';
-  if (prefer) headers.Prefer = prefer;
-  const res = await fetch(BASE + path, {
-    method,
-    headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
-    cache: 'no-store',
+let signedIn;
+function ready() {
+  signedIn ??= new Promise((resolve, reject) => {
+    const stop = onAuthStateChanged(auth, (user) => {
+      stop();
+      if (user) resolve(user);
+      else signInAnonymously(auth).then((c) => resolve(c.user), reject);
+    }, reject);
   });
-  const text = await res.text();
-  const data = text ? JSON.parse(text) : null;
-  if (!res.ok) throw new ApiError(res.status, data);
-  return data;
+  signedIn.catch(() => { signedIn = undefined; }); // allow a retry after a failure
+  return signedIn;
 }
 
-const enc = encodeURIComponent;
-
-export function listChallenges(category) {
-  return request(`/challenges?category=eq.${enc(category)}&select=*`);
+export async function listChallenges() {
+  const res = await fetch('/challenges.json', { cache: 'no-store' });
+  if (!res.ok) throw new Error(`challenges.json ${res.status}`);
+  return res.json();
 }
 
-export async function getChallenge(category, slug) {
-  const rows = await request(`/challenges?category=eq.${enc(category)}&slug=eq.${enc(slug)}&select=*`);
-  return rows[0] || null;
+export const challengeKey = (c) => `${c.category}-${c.slug}`;
+const participantsRef = (key) => collection(db, 'challenges', key, 'participants');
+
+/** Names Firestore can't use as document ids. */
+export function invalidName(name) {
+  return name.includes('/') || name === '.' || name === '..' || /^__.*__$/.test(name);
 }
 
-/** Everyone in the challenge with their check-in dates, in join order. */
-export async function getParticipants(challengeId) {
-  const rows = await request(
-    `/participants?challenge_id=eq.${enc(challengeId)}&select=id,name,created_at,checkins(date)&order=created_at.asc`
-  );
-  return rows.map((p) => ({ id: p.id, name: p.name, dates: new Set(p.checkins.map((c) => c.date)) }));
-}
-
-/** Returns the new participant, or null if the name is already taken (409). */
-export async function addParticipant(challengeId, name) {
-  try {
-    const rows = await request('/participants', {
-      method: 'POST',
-      body: { challenge_id: challengeId, name },
-      prefer: 'return=representation',
+/**
+ * Live participant list, in join order. Local writes show up immediately
+ * (Firestore latency compensation) and are reverted by the SDK if the server rejects them.
+ */
+export async function subscribe(key, onData, onError) {
+  await ready();
+  return onSnapshot(participantsRef(key), (snap) => {
+    const list = snap.docs.map((d) => {
+      const x = d.data({ serverTimestamps: 'estimate' });
+      return { id: d.id, name: x.name, createdAt: x.createdAt?.toMillis?.() ?? Date.now(), dates: new Set(x.dates || []) };
     });
-    return rows[0];
-  } catch (e) {
-    if (e instanceof ApiError && e.status === 409) return null;
-    throw e;
-  }
+    list.sort((a, b) => a.createdAt - b.createdAt);
+    onData(list);
+  }, onError);
 }
 
-/** Idempotent: checking a day that is already checked (e.g. from another device) is fine. */
-export function addCheckin(participantId, date) {
-  return request('/checkins?on_conflict=participant_id,date', {
-    method: 'POST',
-    body: { participant_id: participantId, date },
-    prefer: 'resolution=ignore-duplicates,return=minimal',
+/** Creates the participant, or returns the existing one with the same name. */
+export async function join(key, name) {
+  await ready();
+  const ref = doc(participantsRef(key), name.toLowerCase());
+  return runTransaction(db, async (tx) => {
+    const snap = await tx.get(ref);
+    if (snap.exists()) return { id: ref.id, name: snap.data().name };
+    tx.set(ref, { name, createdAt: serverTimestamp(), dates: [] });
+    return { id: ref.id, name };
   });
 }
 
-export function removeCheckin(participantId, date) {
-  return request(`/checkins?participant_id=eq.${enc(participantId)}&date=eq.${enc(date)}`, {
-    method: 'DELETE',
-    prefer: 'return=minimal',
+export async function setCheckin(key, participantId, date, checked) {
+  await ready();
+  return updateDoc(doc(participantsRef(key), participantId), {
+    dates: checked ? arrayUnion(date) : arrayRemove(date),
   });
 }

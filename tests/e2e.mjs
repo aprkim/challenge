@@ -1,34 +1,48 @@
-// End-to-end check on two emulated phones (iPhone Safari/WebKit-sized and Android Chrome-sized)
-// against the in-memory mock API. Run: node tests/e2e.mjs [screenshotDir]
-import { createServer } from 'node:http';
+// End-to-end check on two emulated phones (iPhone- and Android-sized) against the
+// Firebase emulators, using the real Firebase SDK and firestore.rules.
+// Run: npm run e2e   (or: node tests/e2e.mjs [screenshotDir] inside `firebase emulators:exec`)
 import { spawn } from 'node:child_process';
 import { strict as assert } from 'node:assert';
 import { createRequire } from 'node:module';
-import { createMockApi } from './mock-api.mjs';
 import { todayLocal, addDays } from '../assets/dates.js';
 
 // Uses the machine's Playwright (global install, resolved through NODE_PATH).
 const { chromium, devices } = createRequire(import.meta.url)('playwright');
 const shots = process.argv[2];
 const today = todayLocal();
-let fail = false;
 
-const challenges = [
-  { id: 'c03', category: 'exercise', slug: '03', community_label: '오늘도 했다', title: '연말 6주 챌린지',
-    start_date: '2026-11-20', end_date: '2026-12-31', bonus_date: '2027-01-01', goal: 24, weekly_target: 4 },
-  // A challenge that is already running "today", so days can be checked.
-  { id: 'ct', category: 'test', slug: 't1', community_label: '오늘도 했다', title: '테스트 챌린지',
-    start_date: addDays(today, -25), end_date: addDays(today, 16), bonus_date: addDays(today, 17), goal: 24, weekly_target: 4 },
-];
-const api = createMockApi({ challenges, failCheckins: () => fail });
-const apiServer = createServer((req, res) => api(req, res, new URL(req.url, 'http://x'))).listen(3102);
-const web = spawn('node', ['scripts/dev-server.mjs'], { env: { ...process.env, PORT: '8102', POSTGREST_URL: 'http://localhost:3102' }, stdio: 'ignore' });
+const web = spawn('node', ['scripts/dev-server.mjs'], { env: { ...process.env, PORT: '8102', EMULATOR: '1' }, stdio: 'ignore' });
 await new Promise((r) => setTimeout(r, 600));
 const BASE = 'http://localhost:8102';
 
-const browser = await chromium.launch();
+// Write straight to the Firestore emulator, bypassing rules (test setup only).
+async function adminSetDates(key, pid, dates) {
+  const url = `http://localhost:8085/v1/projects/demo-challenge/databases/(default)/documents/challenges/${key}/participants/${encodeURIComponent(pid)}?updateMask.fieldPaths=dates`;
+  const res = await fetch(url, {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer owner', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fields: { dates: { arrayValue: { values: dates.map((d) => ({ stringValue: d })) } } } }),
+  });
+  assert.ok(res.ok, `emulator write failed: ${res.status}`);
+}
+
+const proxy = process.env.HTTPS_PROXY ? { server: process.env.HTTPS_PROXY, bypass: 'localhost,127.0.0.1' } : undefined;
+const browser = await chromium.launch({ proxy });
 const iphone = await browser.newContext({ ...devices['iPhone 13'] });
 const android = await browser.newContext({ ...devices['Pixel 5'] });
+
+// If gstatic.com is unreachable (sandboxed CI), serve the identical CDN builds that ship
+// in the firebase@10.12.5 npm package: set FIREBASE_SDK_DIR to node_modules/firebase.
+if (process.env.FIREBASE_SDK_DIR) {
+  const { readFile } = await import('node:fs/promises');
+  for (const ctx of [iphone, android]) {
+    await ctx.route('https://www.gstatic.com/firebasejs/10.12.5/*', async (route) => {
+      const file = new URL(route.request().url()).pathname.split('/').pop();
+      route.fulfill({ contentType: 'text/javascript', body: await readFile(`${process.env.FIREBASE_SDK_DIR}/${file}`) });
+    });
+    await ctx.route(/fonts\.(googleapis|gstatic)\.com/, (route) => route.abort());
+  }
+}
 const shot = async (page, name) => shots && page.screenshot({ path: `${shots}/${name}.png`, fullPage: true });
 const step = (msg) => console.log('✓', msg);
 
@@ -100,21 +114,13 @@ try {
   await a.click('text=Everyone');
   await a.waitForTimeout(300);
   assert.equal(await a.locator('.summary .total').textContent(), '3 workouts');
-  step('first device Everyone matches');
-
-  // --- rollback on error ---
-  await a.click('text=My check-ins');
-  fail = true;
-  await day(addDays(today, -3)).click();
-  assert.equal(await day(addDays(today, -3)).getAttribute('aria-pressed'), 'true'); // optimistic
-  await a.locator('#toast:not([hidden])').waitFor();
-  await a.waitForTimeout(100);
-  assert.equal(await day(addDays(today, -3)).getAttribute('aria-pressed'), 'false');
-  assert.equal(await a.locator('.ring .big').textContent(), '2');
-  fail = false;
-  step('optimistic check rolls back with a toast when the save fails');
+  await b.click('text=My check-ins');
+  await b.locator(`[data-date="${addDays(today, -5)}"]`).click();
+  await a.waitForFunction(() => document.querySelector('.summary .total')?.textContent === '4 workouts', null, { timeout: 5000 });
+  step('first device Everyone matches, and updates live when the other phone checks in');
 
   // --- goal reached + bonus ---
+  await a.click('text=My check-ins');
   for (let i = 0; i < 25; i++) {
     const d = addDays(today, -i);
     if ((await day(d).getAttribute('aria-pressed')) === 'false') await day(d).click();
@@ -128,8 +134,23 @@ try {
   await a.waitForTimeout(300);
   assert.match((await a.locator('.row').allInnerTexts())[0], /April\s+Me\s+24 \+1/);
   assert.equal(await a.locator('.summary .sub').textContent(), '2 people · 1 reached the goal');
+  assert.equal(await a.locator('.summary .total').textContent(), '27 workouts');
   await shot(a, '5-everyone-iphone');
   step('25 check-ins → "24 + 1 bonus", Goal reached pill, board "24 +1"');
+
+  // --- rollback when the server rejects a write (rules cap a list at 100 dates) ---
+  await b.click('text=My check-ins');
+  const bday = (d) => b.locator(`[data-date="${d}"]`);
+  const filler = Array.from({ length: 100 }, (_, i) => addDays('2020-01-01', i));
+  await adminSetDates('test-t1', '민지', filler);
+  await bday(addDays(today, -4)).waitFor();
+  await b.waitForTimeout(300);
+  await bday(addDays(today, -4)).click();
+  await b.locator('#toast:not([hidden])').waitFor();
+  await b.waitForTimeout(200);
+  assert.equal(await bday(addDays(today, -4)).getAttribute('aria-pressed'), 'false');
+  assert.equal(await b.locator('.ring .big').textContent(), '0'); // out-of-range dates never count
+  step('server-rejected check-in rolls back with a toast; junk dates are not counted');
 
   // --- Not you? ---
   await a.click('text=My check-ins');
@@ -145,7 +166,6 @@ try {
     const w = await p.evaluate(() => [document.documentElement.scrollWidth, innerWidth]);
     assert.ok(w[0] <= w[1], `horizontal scroll ${w}`);
   }
-  await b.click('text=My check-ins');
   const small = await b.evaluate(() =>
     [...document.querySelectorAll('button, a')].map((el) => el.getBoundingClientRect()).filter((r) => r.height && r.height < 44).length);
   assert.equal(small, 0);
@@ -158,5 +178,4 @@ try {
 } finally {
   await browser.close();
   web.kill();
-  apiServer.close();
 }
