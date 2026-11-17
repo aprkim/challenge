@@ -104,8 +104,11 @@ export function progress(count, goal) {
   };
 }
 
-/** Pick the challenge /exercise should open: the latest one that has started, else the next to start. */
+/**
+ * Pick the challenge /exercise should open: the latest one that has started, else the next to start.
+ * Challenges marked `hidden` (e.g. a test run) are reachable by URL but never picked.
+ */
 export function pickCurrent(challenges, today) {
-  const sorted = [...challenges].sort((a, b) => (a.start_date < b.start_date ? 1 : -1));
+  const sorted = challenges.filter((c) => !c.hidden).sort((a, b) => (a.start_date < b.start_date ? 1 : -1));
   return sorted.find((c) => c.start_date <= today) || sorted[sorted.length - 1] || null;
 }

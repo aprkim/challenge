@@ -19,6 +19,7 @@
     "end_date": "2026-12-31",
     "bonus_date": "2027-01-01",
     "goal": 24,
-    "weekly_target": 4
+    "weekly_target": 4,
+    "hidden": true
   }
 ]

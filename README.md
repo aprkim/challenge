@@ -21,6 +21,8 @@ Share `challenge.lihallc.com/exercise` with the group. It always opens the curre
 
 Add an entry to `challenges.json` with slug `"4"` and its title and dates, then push. `/exercise/4` works right away, and `/exercise` switches to it on its start date. Each challenge's data sits under its own key (`exercise-4`), so nothing carries over.
 
+Add `"hidden": true` to an entry to keep it reachable by its URL (e.g. `/exercise/test` for trying things out) without `/exercise` ever sending people there.
+
 ## Data
 
 `challenges/{category}-{slug}/participants/{lowercased name}` → `{ name, createdAt, dates: ['2026-11-20', …] }`

@@ -61,6 +61,8 @@ test('pickCurrent: latest started, else next upcoming', () => {
   assert.equal(pickCurrent(list, '2027-02-01').slug, '04');
   assert.equal(pickCurrent([list[1]], '2026-11-17').slug, '03');
   assert.equal(pickCurrent([], '2026-11-17'), null);
+  const withTest = [{ slug: 'test', start_date: '2026-11-10', hidden: true }, list[1]];
+  assert.equal(pickCurrent(withTest, '2026-11-17').slug, '03'); // hidden is never picked
 });
 
 test('todayLocal uses local calendar fields', () => {
